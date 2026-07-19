@@ -9,7 +9,8 @@ const BOT_ID = process.env.WECOM_BOT_ID;
 const BOT_SECRET = process.env.WECOM_BOT_SECRET;
 const QODER_BIN = process.env.QODER_BIN || '/root/.qoder-cn/bin/qoderclicn/qoderclicn-1.0.48';
 const QODER_CWD = process.env.QODER_CWD || '/root';
-const QODER_TIMEOUT = parseInt(process.env.QODER_TIMEOUT || '120000', 10);
+const QODER_TIMEOUT = parseInt(process.env.QODER_TIMEOUT || '180000', 10);
+const MAX_RETRIES = 2;
 
 if (!BOT_ID || !BOT_SECRET) {
   console.error('请设置环境变量 WECOM_BOT_ID 和 WECOM_BOT_SECRET');
@@ -33,35 +34,46 @@ function getOrCreateSession(frame) {
 }
 
 async function callQoder(prompt, session) {
-  try {
-    const { stdout } = await execFileAsync(QODER_BIN, [
-      '-p', '-o', 'json',
-      '--no-session-persistence',
-      '--session-id', session.sessionId,
-      '-w', QODER_CWD,
-      '--permission-mode', 'bypass_permissions',
-      prompt,
-    ], {
-      timeout: QODER_TIMEOUT,
-      maxBuffer: 10 * 1024 * 1024,
-      cwd: QODER_CWD,
-      env: { ...process.env, HOME: process.env.HOME || '/root' },
-    });
-    const result = JSON.parse(stdout.trim().split('\n').pop());
-    if (result.is_error) throw new Error(result.result || 'QoderCN 执行出错');
-    return result.result;
-  } catch (err) {
-    if (err.code === 'ETIMEDOUT' || err.killed) {
-      throw new Error('处理超时，请稍后重试或简化问题');
-    }
-    if (err.stderr) {
-      const stderr = err.stderr.toString();
-      if (stderr.includes('authentication') || stderr.includes('login')) {
-        throw new Error('QoderCN 未登录，请先在终端运行 qoderclicn login');
+  let lastError;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      if (attempt > 0) {
+        console.log(`[bridge] 重试第 ${attempt} 次...`);
+        await new Promise(r => setTimeout(r, 2000 * attempt));
+      }
+      const { stdout } = await execFileAsync(QODER_BIN, [
+        '-p', '-o', 'json',
+        '--no-session-persistence',
+        '--session-id', session.sessionId,
+        '-w', QODER_CWD,
+        '--permission-mode', 'bypass_permissions',
+        prompt,
+      ], {
+        timeout: QODER_TIMEOUT,
+        maxBuffer: 10 * 1024 * 1024,
+        cwd: QODER_CWD,
+        env: { ...process.env, HOME: process.env.HOME || '/root' },
+      });
+      const result = JSON.parse(stdout.trim().split('\n').pop());
+      if (result.is_error) throw new Error(result.result || 'QoderCN 执行出错');
+      return result.result;
+    } catch (err) {
+      lastError = err;
+      if (err.code === 'ETIMEDOUT' || err.killed) {
+        throw new Error('处理超时，请稍后重试或简化问题');
+      }
+      if (err.stderr) {
+        const stderr = err.stderr.toString();
+        if (stderr.includes('authentication') || stderr.includes('login')) {
+          throw new Error('QoderCN 未登录，请先在终端运行 qoderclicn login');
+        }
+      }
+      if (attempt === MAX_RETRIES) {
+        throw new Error('QoderCN 调用失败，请稍后重试');
       }
     }
-    throw new Error('QoderCN 调用失败，请稍后重试');
   }
+  throw lastError || new Error('未知错误');
 }
 
 const wsClient = new AiBot.WSClient({
