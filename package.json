@@ -1,0 +1,16 @@
+{
+  "name": "wecom-qoder-bridge",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "企业微信 ↔ QoderCN CLI 桥接服务",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "^1.0.7"
+  }
+}
