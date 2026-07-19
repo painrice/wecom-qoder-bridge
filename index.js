@@ -28,7 +28,7 @@ function getSessionKey(body) {
 function getOrCreateSession(frame) {
   const key = getSessionKey(frame.body);
   if (!userSessions.has(key)) {
-    userSessions.set(key, { sessionId: randomUUID(), createdAt: Date.now() });
+    userSessions.set(key, { sessionId: randomUUID(), createdAt: Date.now(), callCount: 0 });
   }
   return userSessions.get(key);
 }
@@ -41,9 +41,12 @@ async function callQoder(prompt, session) {
         console.log(`[bridge] 重试第 ${attempt} 次...`);
         await new Promise(r => setTimeout(r, 2000 * attempt));
       }
+      const sessionArgs = session.callCount === 0
+        ? ['--session-id', session.sessionId]
+        : ['--resume', session.sessionId];
       const { stdout } = await execFileAsync(QODER_BIN, [
         '-p', '-o', 'json',
-        '--session-id', session.sessionId,
+        ...sessionArgs,
         '-w', QODER_CWD,
         '--permission-mode', 'bypass_permissions',
         prompt,
@@ -55,6 +58,7 @@ async function callQoder(prompt, session) {
       });
       const result = JSON.parse(stdout.trim().split('\n').pop());
       if (result.is_error) throw new Error(result.result || 'QoderCN 执行出错');
+      session.callCount++;
       return result.result;
     } catch (err) {
       lastError = err;
