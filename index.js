@@ -33,22 +33,35 @@ function getOrCreateSession(frame) {
 }
 
 async function callQoder(prompt, session) {
-  const { stdout } = await execFileAsync(QODER_BIN, [
-    '-p', '-o', 'json',
-    '--no-session-persistence',
-    '--session-id', session.sessionId,
-    '-w', QODER_CWD,
-    '--permission-mode', 'bypass_permissions',
-    prompt,
-  ], {
-    timeout: QODER_TIMEOUT,
-    maxBuffer: 10 * 1024 * 1024,
-    cwd: QODER_CWD,
-    env: { ...process.env, HOME: process.env.HOME || '/root' },
-  });
-  const result = JSON.parse(stdout.trim().split('\n').pop());
-  if (result.is_error) throw new Error(result.result || 'QoderCN 执行出错');
-  return result.result;
+  try {
+    const { stdout } = await execFileAsync(QODER_BIN, [
+      '-p', '-o', 'json',
+      '--no-session-persistence',
+      '--session-id', session.sessionId,
+      '-w', QODER_CWD,
+      '--permission-mode', 'bypass_permissions',
+      prompt,
+    ], {
+      timeout: QODER_TIMEOUT,
+      maxBuffer: 10 * 1024 * 1024,
+      cwd: QODER_CWD,
+      env: { ...process.env, HOME: process.env.HOME || '/root' },
+    });
+    const result = JSON.parse(stdout.trim().split('\n').pop());
+    if (result.is_error) throw new Error(result.result || 'QoderCN 执行出错');
+    return result.result;
+  } catch (err) {
+    if (err.code === 'ETIMEDOUT' || err.killed) {
+      throw new Error('处理超时，请稍后重试或简化问题');
+    }
+    if (err.stderr) {
+      const stderr = err.stderr.toString();
+      if (stderr.includes('authentication') || stderr.includes('login')) {
+        throw new Error('QoderCN 未登录，请先在终端运行 qoderclicn login');
+      }
+    }
+    throw new Error('QoderCN 调用失败，请稍后重试');
+  }
 }
 
 const wsClient = new AiBot.WSClient({
