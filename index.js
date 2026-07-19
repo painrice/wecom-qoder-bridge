@@ -43,7 +43,6 @@ async function callQoder(prompt, session) {
       }
       const { stdout } = await execFileAsync(QODER_BIN, [
         '-p', '-o', 'json',
-        '--no-session-persistence',
         '--session-id', session.sessionId,
         '-w', QODER_CWD,
         '--permission-mode', 'bypass_permissions',
