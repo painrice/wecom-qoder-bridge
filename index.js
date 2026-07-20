@@ -1,5 +1,6 @@
 import AiBot from '@wecom/aibot-node-sdk';
-import { query, accessTokenFromEnv } from '@qoder-ai/qoder-agent-sdk';
+import { generateReqId } from '@wecom/aibot-node-sdk';
+import { query, qodercliAuth } from '@qoder-ai/qoder-agent-sdk';
 
 const BOT_ID = process.env.WECOM_BOT_ID;
 const BOT_SECRET = process.env.WECOM_BOT_SECRET;
@@ -26,12 +27,13 @@ function getOrCreateSession(frame) {
   return userSessions.get(key);
 }
 
-async function callQoder(prompt, session) {
+async function callQoder(prompt, session, onChunk) {
   const options = {
-    auth: accessTokenFromEnv(),
+    auth: qodercliAuth(),
     permissionMode: 'bypassPermissions',
     cwd: QODER_CWD,
     maxTurns: 30,
+    includePartialMessages: true,
     ...(session.sessionId ? { resume: session.sessionId } : {}),
   };
 
@@ -39,12 +41,13 @@ async function callQoder(prompt, session) {
   const q = query({ prompt, options });
   try {
     for await (const msg of q) {
-      if (msg.type === 'assistant') {
-        for (const block of msg.message.content) {
-          if (block.type === 'text') result += block.text;
-        }
-      } else if (msg.type === 'init' && msg.session_id) {
+      if (msg.type === 'system' && msg.session_id) {
         session.sessionId = msg.session_id;
+      } else if (msg.type === 'stream_event') {
+        if (msg.event?.type === 'content_block_delta' && msg.event?.delta?.type === 'text_delta') {
+          result += msg.event.delta.text;
+          onChunk?.(result);
+        }
       } else if (msg.type === 'result') {
         if (msg.subtype !== 'success') {
           const errors = msg.errors?.join('; ') || msg.subtype;
@@ -98,26 +101,25 @@ wsClient.on('message.text', async (frame) => {
     console.log(`[bridge] 收到${chattype === 'group' ? '群聊' : '单聊'}消息 from ${from}: ${content.slice(0, 50)}`);
 
     const session = getOrCreateSession(frame);
+    const streamId = generateReqId('stream');
 
-    await wsClient.sendMessage(chatid, {
-      msgtype: 'markdown',
-      markdown: { content: '⏳ 正在思考...' },
+    await wsClient.replyStream(frame, streamId, '⏳ 正在思考...', false);
+
+    let lastSentLen = 0;
+    const result = await callQoder(content, session, (text) => {
+      if (text.length - lastSentLen > 50) {
+        wsClient.replyStream(frame, streamId, text, false).catch(() => {});
+        lastSentLen = text.length;
+      }
     });
 
-    const result = await callQoder(content, session);
-    await wsClient.sendMessage(chatid, {
-      msgtype: 'markdown',
-      markdown: { content: result },
-    });
-    console.log(`[bridge] 回复成功 to ${from}, 长度: ${result.length}`);
+    await wsClient.replyStream(frame, streamId, result, true);
+    console.log(`[bridge] 回复成功 to ${from}, 长度: ${result.length}, session: ${session.sessionId}`);
   } catch (err) {
     console.error('[bridge] 消息处理失败:', err.message);
     try {
-      const chatid = frame.body.chattype === 'group' ? frame.body.chatid : frame.body.from.userid;
-      await wsClient.sendMessage(chatid, {
-        msgtype: 'markdown',
-        markdown: { content: ` 处理出错: ${err.message}` },
-      });
+      const streamId = generateReqId('stream');
+      await wsClient.replyStream(frame, streamId, `处理出错: ${err.message}`, true);
     } catch (e) {
       console.error('[bridge] 发送错误消息也失败:', e.message);
     }
@@ -133,17 +135,19 @@ wsClient.on('message.voice', async (frame) => {
     console.log(`[bridge] 收到语音 from ${from}: ${transcription.slice(0, 50)}`);
 
     const session = getOrCreateSession(frame);
+    const streamId = generateReqId('stream');
 
-    await wsClient.sendMessage(from, {
-      msgtype: 'markdown',
-      markdown: { content: '⏳ 正在处理语音...' },
+    await wsClient.replyStream(frame, streamId, '⏳ 正在处理语音...', false);
+
+    let lastSentLen = 0;
+    const result = await callQoder(transcription, session, (text) => {
+      if (text.length - lastSentLen > 50) {
+        wsClient.replyStream(frame, streamId, text, false).catch(() => {});
+        lastSentLen = text.length;
+      }
     });
 
-    const result = await callQoder(transcription, session);
-    await wsClient.sendMessage(from, {
-      msgtype: 'markdown',
-      markdown: { content: result },
-    });
+    await wsClient.replyStream(frame, streamId, result, true);
   } catch (err) {
     console.error('[bridge] 语音处理失败:', err.message);
   }
