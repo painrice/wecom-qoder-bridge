@@ -1,16 +1,9 @@
 import AiBot from '@wecom/aibot-node-sdk';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import { randomUUID } from 'crypto';
-
-const execFileAsync = promisify(execFile);
+import { query, accessTokenFromEnv } from '@qoder-ai/qoder-agent-sdk';
 
 const BOT_ID = process.env.WECOM_BOT_ID;
 const BOT_SECRET = process.env.WECOM_BOT_SECRET;
-const QODER_BIN = process.env.QODER_BIN || '/root/.qoder-cn/bin/qoderclicn/qoderclicn-1.0.48';
 const QODER_CWD = process.env.QODER_CWD || '/root';
-const QODER_TIMEOUT = parseInt(process.env.QODER_TIMEOUT || '180000', 10);
-const MAX_RETRIES = 2;
 
 if (!BOT_ID || !BOT_SECRET) {
   console.error('请设置环境变量 WECOM_BOT_ID 和 WECOM_BOT_SECRET');
@@ -28,55 +21,47 @@ function getSessionKey(body) {
 function getOrCreateSession(frame) {
   const key = getSessionKey(frame.body);
   if (!userSessions.has(key)) {
-    userSessions.set(key, { sessionId: randomUUID(), createdAt: Date.now(), callCount: 0 });
+    userSessions.set(key, { sessionId: null, createdAt: Date.now(), callCount: 0 });
   }
   return userSessions.get(key);
 }
 
 async function callQoder(prompt, session) {
-  let lastError;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      if (attempt > 0) {
-        console.log(`[bridge] 重试第 ${attempt} 次...`);
-        await new Promise(r => setTimeout(r, 2000 * attempt));
-      }
-      const sessionArgs = session.callCount === 0
-        ? ['--session-id', session.sessionId]
-        : ['--resume', session.sessionId];
-      const { stdout } = await execFileAsync(QODER_BIN, [
-        '-p', '-o', 'json',
-        ...sessionArgs,
-        '-w', QODER_CWD,
-        '--permission-mode', 'bypass_permissions',
-        prompt,
-      ], {
-        timeout: QODER_TIMEOUT,
-        maxBuffer: 10 * 1024 * 1024,
-        cwd: QODER_CWD,
-        env: { ...process.env, HOME: process.env.HOME || '/root' },
-      });
-      const result = JSON.parse(stdout.trim().split('\n').pop());
-      if (result.is_error) throw new Error(result.result || 'QoderCN 执行出错');
-      session.callCount++;
-      return result.result;
-    } catch (err) {
-      lastError = err;
-      if (err.code === 'ETIMEDOUT' || err.killed) {
-        throw new Error('处理超时，请稍后重试或简化问题');
-      }
-      if (err.stderr) {
-        const stderr = err.stderr.toString();
-        if (stderr.includes('authentication') || stderr.includes('login')) {
-          throw new Error('QoderCN 未登录，请先在终端运行 qoderclicn login');
+  const options = {
+    auth: accessTokenFromEnv(),
+    permissionMode: 'bypassPermissions',
+    cwd: QODER_CWD,
+    maxTurns: 30,
+    ...(session.sessionId ? { resume: session.sessionId } : {}),
+  };
+
+  let result = '';
+  const q = query({ prompt, options });
+  try {
+    for await (const msg of q) {
+      if (msg.type === 'assistant') {
+        for (const block of msg.message.content) {
+          if (block.type === 'text') result += block.text;
+        }
+      } else if (msg.type === 'init' && msg.session_id) {
+        session.sessionId = msg.session_id;
+      } else if (msg.type === 'result') {
+        if (msg.subtype !== 'success') {
+          const errors = msg.errors?.join('; ') || msg.subtype;
+          throw new Error(`Agent 执行失败: ${errors}`);
         }
       }
-      if (attempt === MAX_RETRIES) {
-        throw new Error('QoderCN 调用失败，请稍后重试');
-      }
     }
+  } finally {
+    q.close();
   }
-  throw lastError || new Error('未知错误');
+
+  if (!result) {
+    throw new Error('未收到回复');
+  }
+
+  session.callCount++;
+  return result;
 }
 
 const wsClient = new AiBot.WSClient({
